@@ -1,0 +1,4 @@
+Linode StackScript for Drupal 7
+
+Installs a LAMP server with the latest version of D7 and Drush to make your life easier.  
+You will need to run the regular Drupal install script at http://<your-linode-hostname>/install.php to complete the installation process.

@@ -1,0 +1,131 @@
+#!/bin/bash
+# Adapted from http://www.linode.com/stackscripts/view/?StackScriptID=71
+#                                                                         
+# <UDF name="db_password" Label="MySQL root Password" />                           
+# <UDF name="db_name" Label="Create Database" default="drupal" example="Drupal database name" />                                                                                          
+# <UDF name="db_user" Label="Create MySQL User" default="drupal" example="Drupal database user" />                                                                                        
+# <UDF name="db_user_password" Label="MySQL User's Password" default="" example="Optionally Drupal database user's password" />                                                           
+# <UDF name="drupal_hostname" Label="Drupal's hostname" example="Example www.example.com" />                                                                                
+
+
+source <ssinclude StackScriptID="1">  ####make replacement for yum-installers and reference in place of this
+
+###########################################################
+# Drupal Install // move to StackScriptID=1 ??             
+###########################################################
+
+function drupal_install {
+        # installs the latest drupal version from drupal.org
+
+        # $1 - required - The existing virtualhost to install into
+
+        if [ ! -n "$1" ]; then
+                echo "drupal_install() requires the virtualhost as its first argument"
+                return 1;                                                             
+        fi                                                                            
+
+        if [ ! -e /usr/bin/wget ]; then
+                yum install wget
+        fi                              
+
+        # Install drush to install drupal latest version
+
+        if [ ! -e /usr/local/bin/drush ]; then
+                wget --quiet -O - http://ftp.drupal.org/files/projects/drush-7.x-4.4.tar.gz | sudo tar -zxf - -C /usr/local/share
+                ln -s /usr/local/share/drush/drush /usr/local/bin/drush
+                drush
+                                                                                     
+                if [ ! -x /usr/local/bin/drush ]; then                                       
+                       echo "Could not install drush in /usr/local/bin"                      
+                       exit 1                                                                
+                fi                                                                           
+        fi                                                                                   
+
+########
+        VPATH=$(apache_virtualhost_get_docroot $1)
+
+        if [ ! -n "$VPATH" ]; then
+                echo "Could not determine DocumentRoot for $1"
+                return 1;                                     
+        fi                                                    
+
+        # download, extract, chown, and get our config file started
+        cd $VPATH                                                  
+        cd .. && rm -rf public_html                                
+        drush dl drupal && mv $(find . -type d -name drupal\*) public_html
+        cd $VPATH                                                         
+        cp sites/default/default.settings.php sites/default/settings.php  
+        if [ -f /tmp/image/image.imagemagick.inc ]; then                  
+                cp /tmp/image/image.imagemagick.inc includes/             
+                rm -rf /tmp/image                                         
+        fi                                                                
+        mkdir sites/default/files                                         
+        chmod 640 sites/default/settings.php                              
+        chown -R www-data: .                                              
+
+        # database configuration
+        db_user_password        
+        if [ ! -n "$DB_USER_PASSWORD" ]; then
+                DB_USER_PASSWORD=$(randomString 20)
+        fi                                         
+
+        mysql_create_database "$DB_PASSWORD" "$DB_NAME"
+        mysql_create_user "$DB_PASSWORD" "$DB_USER" "$DB_USER_PASSWORD"
+        mysql_grant_user "$DB_PASSWORD" "$DB_USER" "$DB_NAME"          
+
+        sed -i "/^$db_url/s/mysql\:\/\/username:password/mysqli\:\/\/$DB_USER:$DB_USER_PASSWORD/" sites/default/settings.php                                                              
+        sed -i "/^$db_url/s/databasename/$DB_NAME/" sites/default/settings.php               
+
+        # setup crontab and clean-urls
+        echo "0 * * * * /usr/local/bin/drush -r $VPATH cron >/dev/null" | crontab -                                                                                    
+        a2enmod rewrite                                                                      
+        touch /tmp/restart-apache2                                                           
+
+        # remove # from lines below if you want modules enabled
+        # drush dl admin_menu advanced_help calendar cck comment_notify date filefield fivestar
+        # drush dl google_analytics image imageapi imagecache img_assist jquery_ui link
+        # drush dl markdown pathauto print tagadelic token votingapi webform
+}
+
+
+# Replacement for 'goodstuff function in SS 1
+function goodstuffYum {
+  yum install wget vim less
+  sed -i -e 's/^#PS1=/PS1=/' /root/.bashrc # enable the colorful root bash prompt
+  sed -i -e "s/^#alias ll='ls -l'/alias ll='ls -al'/" /root/.bashrc # enable ll list long alias <3
+}
+
+
+postfix_install_loopback_only
+
+#add the remi repo as the source for newer packages
+rpm -Uvh http://rpms.famillecollet.com/enterprise/remi-release-6.rpm
+
+#Install mysql 5.5 and enable on startup
+yum --enablerepo=remi,remi-test install mysql mysql-server
+
+/etc/init.d/mysqld start
+mysqladmin -u root password "$DB_PASSWORD"
+chkconfig --levels 235 mysqld on
+
+#Install php5.3 with Apache
+yum --enablerepo=remi install httpd php php-common
+yum --enablerepo=remi install php-pear php-pdo php-mysql php-pecl-memcache php-gd php-mbstring php-mcrypt php-xml
+
+/etc/init.d/httpd start
+chkconfig --levels 235 httpd on
+
+######
+php_install_with_apache && php_tune
+
+
+
+
+if [ ! -n "$DRUPAL_HOSTNAME" ]; then
+  apache_install && apache_tune 40 && apache_virtualhost_from_rdns
+  drupal_install $(get_rdns_primary_ip)
+else
+  apache_install && apache_tune 40 && apache_virtualhost $DRUPAL_HOSTNAME
+  drupal_install $DRUPAL_HOSTNAME
+fi
+restartServices
